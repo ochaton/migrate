@@ -25,17 +25,17 @@ local hsize = ffi.sizeof "struct header_v11"
 local M = {}
 
 local function row_iterator(self)
-	if self.buf:avail() == 0 then
+	local buf = self.buf
+	if buf:avail() <= 4 then
 		self:close()
 		return nil
 	end
 
-	local buf = self.buf
 	assert(buf:u32() == magic, "malformed row magic")
 
 	assert(buf:have(hsize), "unexpected end of file")
-	local h = ffi.cast('struct header_v11 *', buf.p.c)
-	assert(h.header_crc32c == ffi.C.crc32_calc(0, buf.p.c+4, hsize-4), "header crc32 missmatch")
+		local h = ffi.cast('struct header_v11 *', buf.p.c)
+		assert(h.header_crc32c == ffi.C.crc32_calc(0, buf.p.c+4, hsize-4), "header crc32 missmatch")
 	buf:skip(hsize)
 
 	assert(buf:have(h.len), "unexpected end of file")
@@ -99,8 +99,8 @@ function M.pairs(path)
 	if base == -1 then
 		error(errno.strerror(ffi.errno()))
 	end
-	self.base = ffi.gc(base, function(addr)
-		if -1 == ffi.C.munmap(addr, self.size) then
+	self.base = ffi.gc(base, function()
+		if -1 == ffi.C.munmap(self.base, self.size) then
 			log.error("Failed to unmap addr for %s: %s", path, errno.strerror(ffi.errno()))
 		end
 	end)
