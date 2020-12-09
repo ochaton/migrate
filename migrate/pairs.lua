@@ -2,7 +2,7 @@ local ffi = require 'ffi.reloadable'
 local errno = require 'errno'
 local fio = require 'fio'
 local fun = require 'fun'
-local log = require 'log'
+local fiber = require 'fiber'
 local saferbuf = require 'bin.saferbuf'
 
 local parse_xlog_row = require 'migrate.parser'.parse_xlog_row
@@ -99,21 +99,19 @@ function M.pairs(path)
 	if base == -1 then
 		error(errno.strerror(ffi.errno()))
 	end
-	self.base = ffi.gc(base, function()
-		if -1 == ffi.C.munmap(self.base, self.size) then
-			log.error("Failed to unmap addr for %s: %s", path, errno.strerror(ffi.errno()))
-		end
-	end)
+	self.base = base
 	self.buf = saferbuf.new(base, self.size)
 
 	function self:close() -- luacheck: ignore
-		ffi.gc(self.base, nil)
 		self.buf = nil
+		fiber.new(self.file.close, self.file)
 		if -1 == ffi.C.munmap(self.base, self.size) then
 			error(("Failed to unmap addr for %s: %s"):format(path, errno.strerror(ffi.errno())), 2)
 		end
-		assert(self.file:close())
 	end
+
+	self.__guard = newproxy()
+	debug.setmetatable(self.__guard, { __gc = function() self:close() end })
 
 	assert(self.buf:str(#self.header) == self.header, "binary header missmatch")
 
