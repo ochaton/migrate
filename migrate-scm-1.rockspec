@@ -16,7 +16,7 @@ dependencies = {
 build = {
    type = "builtin",
    modules = {
-      ["migrate.pairs"] = "migrate/pairs.lua",
+      ["migrate"] = "migrate/init.lua",
       ["migrate.parser"] = "migrate/parser.lua"
    }
 }
