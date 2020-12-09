@@ -1,7 +1,7 @@
 package = "migrate"
 version = "scm-1"
 source = {
-   url = "https://github.com/orchaton/migrate"
+   url = "git://github.com/orchaton/migrate.git"
 }
 description = {
    summary = "Parser for Tarantool 1.5 binary files",

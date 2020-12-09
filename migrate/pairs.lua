@@ -1,4 +1,4 @@
-local ffi = require 'ffi'
+local ffi = require 'ffi.reloadable'
 local errno = require 'errno'
 local fio = require 'fio'
 local fun = require 'fun'
@@ -42,6 +42,7 @@ local function row_iterator(self)
 	assert(h.data_crc32c == ffi.C.crc32_calc(0, buf.p.c, h.len), "data crc32c missmatch")
 
 	assert(buf:u16() == self.row_type, "unexpected row_type received")
+	buf:skip(8) -- drop cookie
 
 	local space, tuple, op, extra = self.parser(buf)
 	local key

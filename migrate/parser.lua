@@ -36,15 +36,13 @@ local function parse_snap_row(rb)
 	rb:skip(4+4+4) -- skip header
 	local save = rb.p.c
 
-	-- local trb = bin.saferbuf(rb.p.c, row.data_size) -- 10 times slower :(
-
 	local tuple = table_new(row.tuple_size, 0)
 	for i = 1, row.tuple_size do
 		tuple[i] = rb:str(rb:ber())
 	end
 
 	assert(rb.p.c - save == row.data_size, "malformed tuple")
-	return row.space, tuple, 'insert'
+	return row.space, tuple, 'INSERT'
 end
 
 local function parse_tuple(rb)
@@ -79,9 +77,9 @@ local function parse_xlog_row(rb)
 
 	local space, flags = rb:i32(), rb:i32()
 	if op == REPLACE then
-		return space, parse_tuple(rb), band(flags, 0x02) == 0x02 and 'insert' or 'replace'
+		return space, parse_tuple(rb), band(flags, 0x02) == 0x02 and 'INSERT' or 'REPLACE'
 	elseif op == DELETE then
-		return space, parse_tuple(rb), 'delete'
+		return space, parse_tuple(rb), 'DELETE'
 	elseif op == UPDATE then
 		local tuple = parse_tuple(rb)
 		local op_count = rb:i32()
@@ -98,7 +96,7 @@ local function parse_xlog_row(rb)
 			ops[i] = { update_op, field_no, new_val }
 		end
 
-		return space, tuple, 'update', ops
+		return space, tuple, 'UPDATE', ops
 	end
 end
 
