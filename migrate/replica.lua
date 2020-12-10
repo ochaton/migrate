@@ -19,14 +19,15 @@ local hsize = ffi.sizeof "struct header_v11"
 function M:_init(host, primary_port, opt)
 	self.on_tuple = assert(opt.on_tuple, "on_tuple callback is required")
 	self.confirmed_lsn = assert(opt.confirmed_lsn, "migrate.replica: confirmed_lsn is required")
-	self.buf = saferbuf.new(self.rbuf, 0)
 
+	self.debug = opt.debug
 	self.primary = tnt15(host, primary_port)
 	self.primary:wait_con(10)
 
 	local box_cfg do
 		box_cfg = self.primary:call('box.dostring', "return box.cjson.encode(box.cfg)")
-		box_cfg = json.decode(box_cfg)
+		box_cfg = json.decode(box_cfg[1])
+		self.primary:log('I', "Received box.cfg from %s: replication_port = %s", self.primary:desc(), box_cfg.replication_port)
 	end
 
 	self.upstream = { host = host, port = tonumber(box_cfg.replication_port) }
@@ -38,17 +39,22 @@ function M:_init(host, primary_port, opt)
 	self.fiber = fiber.create(function()
 		while not self.pull_primary:is_closed() do
 			local box_info = self.primary:call('box.dostring', "return box.cjson.encode(box.info())")
-			box_info = json.decode(box_info)
+			box_info = json.decode(box_info[1])
 			self.remote_lsn = box_info.lsn
 			self.remote_rw  = box_info.status == 'primary'
 			self.pull_primary:get(0.1)
+
+			if self.debug then
+				self.primary:log('D', "primary: %s; LSN=%s", self.remote_rw, self.remote_lsn)
+			end
 		end
+		self:log('I', "Closing pulling primary")
 	end)
 end
 
 function M:on_connected()
 	local request_lsn = self.confirmed_lsn+1
-	self:log('I', "Connection established. Requesting LSN=%", request_lsn)
+	self:log('I', "Connection established. Requesting LSN=%s", request_lsn)
 	self:push_write(ffi.new('uint64_t[1]', request_lsn), 8)
 	self.replica_state = REQUESTED
 end
@@ -74,9 +80,8 @@ function M:callback(...)
 	return true
 end
 
-function M:on_read()
-	local buf = self.buf
-	buf.len = self.avail
+function M:on_read(...)
+	local buf = saferbuf.new(self.rbuf, self.avail)
 
 	if self.replica_state == REQUESTED then
 		local proto_version = buf:u32()
@@ -114,6 +119,11 @@ function M:on_read()
 
 	self.avail = buf:avail()
 	self.confirmed_lsn = confirmed_lsn
+	self.diff_lsn = (self.remote_lsn or 0) - self.confirmed_lsn
+
+	if self.debug then
+		self:log('D', 'confirmed_lsn: %s lag: %.3fs diff_lsn: %s', self.confirmed_lsn, self.lag or 0, self.diff_lsn)
+	end
 end
 
 function M:close()
