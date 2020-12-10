@@ -49,7 +49,7 @@ local function file_iterator(self)
 	if op == 'UPDATE' or op == 'DELETE' then
 		key, tuple = tuple, extra
 	end
-	return 0, {
+	return h.lsn, {
 		HEADER = {
 			lsn  = h.lsn,
 			type = op,
@@ -247,6 +247,49 @@ function M.pairs(opts)
 	end
 
 	return iterator
+end
+
+local function replica_iterator(self)
+	local t = self.channel:get()
+	if t == nil then
+		return nil
+	end
+
+	local h, space, tuple, op, extra = unpack(t)
+	local key
+	if op == 'UPDATE' or op == 'DELETE' then
+		key, tuple = tuple, extra
+	end
+	return h.lsn, {
+		HEADER = {
+			lsn  = h.lsn,
+			type = op,
+			timestamp = h.tm,
+			source = 'replica',
+			file   = self.replica:desc(),
+		},
+		BODY = {
+			space_id = space,
+			tuple = tuple,
+			key = key,
+		},
+	}
+end
+
+function M.replica(opts)
+	if type(opts) ~= 'table' then
+		error("Usage: migrate.replica({[host:port]]})", 2)
+	end
+
+	local channel = fiber.channel()
+
+	function opts.on_tuple(...)
+		channel:put({...})
+	end
+
+	local self = { channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
+
+	return fun.iter(replica_iterator, self)
 end
 
 return M
