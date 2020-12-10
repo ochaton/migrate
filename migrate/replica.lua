@@ -47,7 +47,7 @@ function M:_init(host, primary_port, opt)
 			self.pull_primary:get(0.1)
 
 			if self.debug then
-				self.primary:log('D', "primary: %s; LSN=%s", self.remote_rw, self.remote_lsn)
+				self.primary:log('D', "primary: %s; LSN=%s diff: %s", self.remote_rw, self.remote_lsn, self.diff_lsn)
 			end
 		end
 		self:log('I', "Closing pulling primary")

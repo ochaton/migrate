@@ -163,6 +163,12 @@ end
 local methods = {}
 methods.__index = methods
 
+function methods:commit()
+	if self.persist then
+		box.commit()
+	end
+end
+
 function methods:confirm(next_lsn)
 	if self.persist then
 		if self.in_txn == self.txn then
@@ -300,12 +306,24 @@ function M.pairs(opts)
 			error("Malformed field replication", 2)
 		end
 
-		self.replica = M.replica(opts.replication)
-		local replica_iterator = self.replica:grep(function(t)
-			return t.HEADER.lsn > self.confirmed_lsn
-		end):take_while(function() return not self.replica:consistent() end)
-
-		iterator = fun.chain(iterator, replica_iterator)
+		iterator = fun.chain(iterator, fun.ones():take_while(function()
+				if not self.replica_iterator then
+					self:commit()
+					fiber.yield()
+					self.replication.confirmed_lsn = self.confirmed_lsn
+					self.replica_iterator = M.replica(self.replication)
+					self.replica = assert(self.replica_iterator.param.replica, "no replica")
+					self.replica:wait_con(10)
+				end
+				if self.replica:consistent() then
+					self.replica:close()
+					return false
+				end
+				return true
+			end):map(function()
+				return self.replica_iterator:nth(1)
+			end)
+		)
 	end
 
 	if self.checklsn then
@@ -376,7 +394,6 @@ function M.replica(opts)
 	end
 
 	local self = { channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
-
 	return fun.iter(replica_iterator, self)
 end
 
