@@ -153,11 +153,32 @@ local function dir_iterator(self, state)
 	else
 		state.reading = nil
 		if state.source == 'snap' then
-			self.confirmed_lsn = self.snap_lsn
+			self:confirm(self.snap_lsn)
+			log.info("Snaphost %s was recovered. Confirming lsn: %s", self.file, self.snap_lsn)
 		end
 		return dir_iterator(self, state)
 	end
 end
+
+local methods = {}
+methods.__index = methods
+
+function methods:confirm(next_lsn)
+	if self.persist then
+		if self.in_txn == self.txn then
+			box.commit()
+			box.begin()
+			self.in_txn = 0
+		end
+		self.in_txn = self.in_txn + 1
+		self.confirmed_lsn = self.schema:put({ 'confirmed_lsn', next_lsn }).value
+	else
+		self.confirmed_lsn = next_lsn
+	end
+	log.verbose("Confirm lsn: %s", self.confirmed_lsn)
+	return self.confirmed_lsn
+end
+
 
 function M.pairs(opts)
 	if type(opts) == 'string' then
@@ -178,7 +199,42 @@ function M.pairs(opts)
 		error("Usage: migrate.pairs(opts|path)", 2)
 	end
 
-	local self = { confirmed_lsn = opts.confirmed_lsn or 0, checklsn = true }
+	local self = setmetatable({
+		confirmed_lsn = opts.confirmed_lsn or 0,
+		persist = opts.persist,
+		txn = opts.txn or 1,
+		checklsn = true,
+
+		in_txn = 0,
+	}, methods)
+
+	if opts.checklsn == false then
+		self.checklsn = false
+	end
+
+	if self.persist then
+		box.schema.space.create('_migration', {
+			format = {
+				{ name = 'key',   type = 'string' },
+				{ name = 'value', type = 'unsigned' },
+			},
+			if_not_exists = true,
+		}):create_index('pri', {
+			parts = { 'key' },
+			if_not_exists = true,
+		})
+		self.schema = box.space._migration
+		local promote_lsn = (self.schema:get('promote_lsn') or {}).value
+		local confirmed_lsn = (self.schema:get('confirmed_lsn') or {}).value
+
+		if confirmed_lsn < promote_lsn then
+			error("Cannot start migration. Previous migration was aborted during snapshot recovery. "
+				.."You need to truncate all spaces which were affected during previous recovery and "
+				.."box.space._migration", 2)
+		end
+
+		self.confirmed_lsn = confirmed_lsn
+	end
 
 	if opts.dir then
 		if type(opts.dir) == 'string' then
@@ -188,7 +244,7 @@ function M.pairs(opts)
 
 		self.fileorder = {}
 
-		if opts.dir.snap then
+		if opts.dir.snap and self.confirmed_lsn == 0 then
 			local snaps = fun.grep("^[0-9]+%.snap$", fio.listdir(opts.dir.snap)):totable()
 			table.sort(snaps)
 
@@ -214,8 +270,8 @@ function M.pairs(opts)
 
 			local pos = 1
 			for i = #xlogs, 1, -1 do
-				local lsn = tonumber64(xlogs[i]:sub(1, -#".xlog"-1))
-				if lsn < self.snap_lsn then
+				local xlog_lsn = tonumber64(xlogs[i]:sub(1, -#".xlog"-1))
+				if xlog_lsn < self.snap_lsn then
 					pos = i
 					break
 				end
@@ -226,11 +282,32 @@ function M.pairs(opts)
 		end
 	end
 
-	if opts.checklsn == false then
-		self.checklsn = false
+	local iterator = fun.iter(dir_iterator, self, { fid = 0 })
+
+	if opts.replication then
+		if type(opts.replication) == 'string' then
+			local host, port = opts.replication:match("^(.+):([^:]+)$")
+			self.replication = {
+				host = host,
+				port = tonumber(port),
+				timeout = 1,
+			}
+		elseif type(opts.replication) == 'table' then
+			self.replication = opts.replication
+			assert(self.replication.host, "replication.host is required")
+			assert(self.replication.port, "replication.port is required (primary)")
+		else
+			error("Malformed field replication", 2)
+		end
+
+		self.replica = M.replica(opts.replication)
+		local replica_iterator = self.replica:grep(function(t)
+			return t.HEADER.lsn > self.confirmed_lsn
+		end):take_while(function() return not self.replica:consistent() end)
+
+		iterator = fun.chain(iterator, replica_iterator)
 	end
 
-	local iterator = fun.iter(dir_iterator, self, { fid = 0 })
 	if self.checklsn then
 		iterator = iterator:map(function(trans)
 			local h = trans.HEADER
@@ -240,12 +317,23 @@ function M.pairs(opts)
 						self.confirmed_lsn, h.lsn, self.file
 					))
 				end
-				self.confirmed_lsn = h.lsn
+				self:confirm(h.lsn)
 			end
 			return trans
 		end)
+	else
+		iterator = iterator:map(function(t)
+			self:confirm(t.HEADER.lsn)
+			return t
+		end)
 	end
 
+	if self.persist then
+		-- We need to close openned transaction
+		iterator = fun.chain(iterator, fun.iter({1}):map(box.commit):grep(fun.op.truth))
+	end
+
+	self.iterator = iterator
 	return iterator
 end
 

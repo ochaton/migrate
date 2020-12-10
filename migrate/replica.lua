@@ -27,7 +27,8 @@ function M:_init(host, primary_port, opt)
 	local box_cfg do
 		box_cfg = self.primary:call('box.dostring', "return box.cjson.encode(box.cfg)")
 		box_cfg = json.decode(box_cfg[1])
-		self.primary:log('I', "Received box.cfg from %s: replication_port = %s", self.primary:desc(), box_cfg.replication_port)
+		self.primary:log('I', "Received box.cfg from %s: replication_port = %s",
+			self.primary:desc(), box_cfg.replication_port)
 	end
 
 	self.upstream = { host = host, port = tonumber(box_cfg.replication_port) }
@@ -35,6 +36,7 @@ function M:_init(host, primary_port, opt)
 	self:super(M, '_init')(self.upstream.host, self.upstream.port, opt)
 
 	self.pull_primary = fiber.channel()
+	self.consistent_cond = fiber.cond()
 
 	self.fiber = fiber.create(function()
 		while not self.pull_primary:is_closed() do
@@ -80,7 +82,11 @@ function M:callback(...)
 	return true
 end
 
-function M:on_read(...)
+function M:consistent()
+	return self.diff_lsn == 0 and self.remote_rw == false
+end
+
+function M:on_read()
 	local buf = saferbuf.new(self.rbuf, self.avail)
 
 	if self.replica_state == REQUESTED then
@@ -123,6 +129,10 @@ function M:on_read(...)
 
 	if self.debug then
 		self:log('D', 'confirmed_lsn: %s lag: %.3fs diff_lsn: %s', self.confirmed_lsn, self.lag or 0, self.diff_lsn)
+	end
+
+	if self:consistent() then
+		self.consistent_cond:broadcast()
 	end
 end
 

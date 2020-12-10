@@ -41,11 +41,76 @@ require "migrate".pairs { dir = { xlog = "/path/to/xlogs" } }:length()
 -- Read xlogs from specified LSN (all xlogs gaps will be checked)
 require "migrate".pairs { dir = { xlog = "/path/to/xlogs" }, confirmed_lsn = 10 }:length()
 
--- Read xlogs from specified LSN (with no LSN Gaps check)
+-- Read xlogs from specified LSN (without LSN Gaps check)
 require "migrate".pairs { dir = { xlog = "/path/to/xlogs" }, confirmed_lsn = 10, checklsn = false }:length()
+
+-- Read transactions from replication (without LSN checks)
+require "migrate".replica{ host = "tarantool.host.i", port = 3301, confirmed_lsn = 0 }:take(100):each(require'log'.info)
+
+-- Execute full pipeline with bootstraping from snaps, xlogs and replication
+require "migrate".pairs {
+	dir = {
+		xlog = "/path/to/xlogs",
+		snap = "/path/to/snaps",
+	},
+	-- persist creates space and persists lsn of each transactions
+	-- in space box.space._migration
+	-- enabling persist forces each tuple to be processed in separate transaction
+	persist = true, -- (default false)
+	-- txn allows to configure how many xlogs will share same transaction
+	-- txn takes effect only with persist
+	txn = 1, -- (default 1)
+	replication = {
+		host = "legacy-master.addr.i",
+		port = 3301, -- primary port,
+		timeout = 1.5,
+		reconnect = 1/3, -- default in seconds
+		debug = false,
+	},
+}
+-- Iterator will gracefully finished when all snaps and xlogs were processed.
+-- If replication is enabled iterator will finish when it confirms read_only master's lsn.
+```
+
+## Example
+Naive example
+
+```lua
+require "migrate".pairs {
+	dir = "/path/to/snaps_and_xlogs",
+	persist = true,
+	txn = 1000,
+	replication = {
+		host = "legacy-master.addr.i",
+		port = 3301, -- primary port,
+		timeout = 3, -- write timeout
+		reconnect = 1/3, -- default in seconds
+		debug = false,
+	}
+}:each(function(t)
+	local h = t.HEADER
+	local space_no = t.BODY.space_id
+	local tuple = t.BODY.tuple
+	local key = t.BODY.key
+	local op = t.HEADER.type -- UPDATE, INSERT, DELETE or REPLACE
+
+	local tuple = migrate_tuple(space_no, tuple)
+	if key then
+		key = migrate_primary(space_no, key)
+	end
+
+	local space = box.space[512+space_no]
+	if op == 'INSERT' then
+		space:insert(tuple)
+	elseif op == 'DELETE' then
+		space:delete(key)
+	elseif op == 'UPDATE' then
+		space:update(key, tuple)
+	elseif op == 'REPLACE' then
+		space:replace(tuple)
+	end
+end)
 ```
 
 ## TODO
-* Persisting of LSN
-* Bootstrap using transactions
-* Replication protocol (1.5) support
+* Tests and doc

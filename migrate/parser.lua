@@ -86,7 +86,7 @@ local function parse_xlog_row(rb)
 
 		local ops = table_new(op_count, 0)
 		for i = 1, op_count do
-			local field_no = rb:i32()
+			local field_no = rb:i32()+1
 			local op_num = rb:i8()
 			local update_op = update_op_map[op_num]
 			if not update_op then
