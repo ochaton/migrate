@@ -22,6 +22,45 @@ function M:_init(host, primary_port, opt)
 
 	self.debug = opt.debug
 	self.primary = tnt15(host, primary_port)
+
+	function self.primary.on_connected(primary)
+		primary:log('I', "Connected to primary")
+		primary.channel = fiber.channel()
+
+		primary.fiber = fiber.create(function()
+			while not primary.channel:is_closed() do
+				local box_info = primary:call('box.dostring', "return box.cjson.encode(box.info())")
+				box_info = json.decode(box_info[1])
+
+				primary.remote_lsn = box_info.lsn
+				primary.remote_rw  = box_info.status == 'primary'
+				primary.discovered = true
+				primary.discovered_at = fiber.time()
+
+				primary.channel:get(0.1)
+
+				if self.debug then
+					primary:log('D', "primary: %s; LSN=%s; consistent=%s; confirmed_lsn=%s; discovered=%s",
+						primary.remote_rw, primary.remote_lsn, self:consistent(),
+						self.confirmed_lsn, primary.discovered
+					)
+				end
+			end
+		end)
+	end
+
+	function self.primary.on_disconnect(primary)
+		primary:log('W', 'Disconnected from primary')
+		primary.discovered = false
+		primary.fiber:cancel()
+	end
+
+	function self.primary.close(primary, ...)
+		primary:log('W', "Closing connection to primary")
+		primary.channel:close()
+		primary:super(primary, 'close')(...)
+	end
+
 	self.primary:wait_con(10)
 
 	local box_cfg do
@@ -34,24 +73,7 @@ function M:_init(host, primary_port, opt)
 	self.upstream = { host = host, port = tonumber(box_cfg.replication_port) }
 	self.replica_state = DISCONECT
 	self:super(M, '_init')(self.upstream.host, self.upstream.port, opt)
-
-	self.pull_primary = fiber.channel()
-	self.consistent_cond = fiber.cond()
-
-	self.fiber = fiber.create(function()
-		while not self.pull_primary:is_closed() do
-			local box_info = self.primary:call('box.dostring', "return box.cjson.encode(box.info())")
-			box_info = json.decode(box_info[1])
-			self.remote_lsn = box_info.lsn
-			self.remote_rw  = box_info.status == 'primary'
-			self.pull_primary:get(0.1)
-
-			if self.debug then
-				self.primary:log('D', "primary: %s; LSN=%s diff: %s", self.remote_rw, self.remote_lsn, self.diff_lsn)
-			end
-		end
-		self:log('I', "Closing pulling primary")
-	end)
+	self.connected = fiber.cond()
 end
 
 function M:on_connected()
@@ -59,6 +81,7 @@ function M:on_connected()
 	self:log('I', "Connection established. Requesting LSN=%s", request_lsn)
 	self:push_write(ffi.new('uint64_t[1]', request_lsn), 8)
 	self.replica_state = REQUESTED
+	self.connected:broadcast()
 end
 
 function M:on_disconnect(e)
@@ -83,10 +106,14 @@ function M:callback(...)
 end
 
 function M:consistent()
-	return self.diff_lsn == 0 and self.remote_rw == false
+	return connection.S2S[self.primary.state] == 'CONNECTED'
+		and self.primary.discovered
+		and (self.primary.discovered_at or 0) > (self.confirmed_at or math.huge)
+		and self.primary.remote_rw == false
+		and self.primary.remote_lsn == self.confirmed_lsn
 end
 
-function M:on_read()
+function M:on_read(is_last)
 	local buf = saferbuf.new(self.rbuf, self.avail)
 
 	if self.replica_state == REQUESTED then
@@ -125,20 +152,21 @@ function M:on_read()
 
 	self.avail = buf:avail()
 	self.confirmed_lsn = confirmed_lsn
-	self.diff_lsn = (self.remote_lsn or 0) - self.confirmed_lsn
+	self.confirmed_at  = fiber.time()
+	self.diff_lsn = (self.primary.remote_lsn or 0) - self.confirmed_lsn
 
 	if self.debug then
 		self:log('D', 'confirmed_lsn: %s lag: %.3fs diff_lsn: %s', self.confirmed_lsn, self.lag or 0, self.diff_lsn)
 	end
 
-	if self:consistent() then
-		self.consistent_cond:broadcast()
+	if is_last then
+		self.avail = 0
 	end
 end
 
 function M:close()
 	self.replica_state = DESTROYED
-	self.pull_primary:close()
+	self.primary:close()
 	self:super(M, 'close')()
 end
 

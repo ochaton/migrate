@@ -322,19 +322,22 @@ function M.pairs(opts)
 
 		iterator = fun.chain(
 			iterator,
-			fun.iter{1}:each(function()
+			fun.range(1, 1):map(function()
 				self.replication.confirmed_lsn = self.confirmed_lsn
 				self.replica_iterator = M.replica(self.replication)
 				self.replica = assert(self.replica_iterator.param.replica, "no replica")
-				assert(self.replica:wait_con(10), "replica not connected")
 			end),
+
 			fun.ones():take_while(function()
 				return not self.replica:consistent()
+			end):map(function()
+				return self.replica_iterator:nth(1)
 			end),
-			fun.iter{1}:each(function()
+
+			fun.iter{1}:map(function()
 				self.replica:close()
 			end)
-		)
+		):grep(fun.op.truth)
 	end
 
 	if self.checklsn then
@@ -367,7 +370,10 @@ function M.pairs(opts)
 end
 
 local function replica_iterator(self)
-	local t = self.channel:get()
+	local t
+	while not t and not self.replica:consistent() do
+		t = self.channel:get(0.01)
+	end
 	if t == nil then
 		return nil
 	end
