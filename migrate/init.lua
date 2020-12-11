@@ -25,7 +25,9 @@ local M = {}
 
 local function file_iterator(self)
 	local buf = self.buf
-
+	if not buf then
+		return nil
+	end
 	if buf:avail() <= 4 then
 		self:close()
 		return nil
@@ -65,6 +67,20 @@ local function file_iterator(self)
 	}
 end
 
+local function file_iterator_close(obj)
+	local self = obj.orig
+	self.buf = nil
+	if self.base then
+		ffi.gc(self.base, nil)
+		if -1 == ffi.C.munmap(self.base, self.size) then
+			error(("Failed to unmap addr for %s: %s"):format(self.path, errno.strerror(ffi.errno())), 2)
+		end
+		self.base = nil
+	end
+	log.verbose("Closing %s", self.path)
+	fiber.new(self.file.close, self.file)
+end
+
 function M.file(path)
 	local file do
 		local err
@@ -102,7 +118,7 @@ function M.file(path)
 
 	local size = self.size
 	local base = ffi.C.mmap(box.NULL, self.size, PROT_READ, MAP_SHARED, file.fh, 0)
-	ffi.gc(base, function(b) self.base = nil ffi.C.munmap(b, size) end)
+	ffi.gc(base, function(b) ffi.C.munmap(b, size) end)
 
 	if base == -1 then
 		error(errno.strerror(ffi.errno()))
@@ -113,51 +129,27 @@ function M.file(path)
 	self.base = base
 	self.buf = saferbuf.new(base, self.size)
 
-	function self:close() -- luacheck: ignore
-		self.buf = nil
-		if self.base then
-			ffi.gc(self.base, nil)
-			if -1 == ffi.C.munmap(self.base, self.size) then
+	function self.close(obj)
+		obj.buf = nil
+		if obj.base then
+			ffi.gc(obj.base, nil)
+			if -1 == ffi.C.munmap(obj.base, obj.size) then
 				error(("Failed to unmap addr for %s: %s"):format(path, errno.strerror(ffi.errno())), 2)
 			end
-			self.base = nil
+			obj.base = nil
 		end
 		log.verbose("Closing %s", path)
-		fiber.new(self.file.close, self.file)
+		fiber.new(obj.file.close, obj.file)
 	end
 
 	self.__guard = newproxy()
-	debug.setmetatable(self.__guard, { __gc = function() self:close() end })
+	debug.setmetatable(self.__guard, {
+		__index = { orig = { base = self.base, size = self.size, path = self.path, file = self.file, buf = self.buf } },
+		__gc = file_iterator_close,
+	})
 
 	assert(self.buf:str(#self.header) == self.header, "binary header missmatch")
 	return fun.iter(file_iterator, self)
-end
-
-local function dir_iterator(self, state)
-	if not state.reading then
-		local fid = state.fid
-		local file = self.fileorder[fid+1]
-		if not file then
-			return nil
-		end
-		self.file = file
-		state.fid = fid+1
-		state.reading = M.file(file)
-		state.source = state.reading.param.source
-	end
-
-	local fstate, value = state.reading.gen(state.reading.param, state.reading.state)
-	if fstate then
-		state.reading.state = fstate
-		return state, value
-	else
-		state.reading = nil
-		if state.source == 'snap' then
-			self:confirm(self.snap_lsn)
-			log.info("Snaphost %s was recovered. Confirming lsn: %s", self.file, self.snap_lsn)
-		end
-		return dir_iterator(self, state)
-	end
 end
 
 local methods = {}
@@ -165,6 +157,7 @@ methods.__index = methods
 
 function methods:commit()
 	if self.persist then
+		self.in_txn = 0
 		box.commit()
 	end
 end
@@ -185,6 +178,13 @@ function methods:confirm(next_lsn)
 	return self.confirmed_lsn
 end
 
+local function finalizer(self, msg)
+	return fun.iter({1}):map(function()
+		self:commit()
+		fiber.yield()
+		log.info(msg)
+	end):grep(fun.op.truth)
+end
 
 function M.pairs(opts)
 	if type(opts) == 'string' then
@@ -242,6 +242,8 @@ function M.pairs(opts)
 		self.confirmed_lsn = confirmed_lsn
 	end
 
+	local iterator = fun.iter{} -- empty iterator
+
 	if opts.dir then
 		if type(opts.dir) == 'string' then
 			opts.dir = { snap = opts.dir, xlog = opts.dir }
@@ -259,12 +261,20 @@ function M.pairs(opts)
 				log.warn("Snaps not found at: %s", opts.dir.snap)
 			else
 				local snap = snaps[#snaps]
-				table.insert(self.fileorder, fio.pathjoin(opts.dir.snap, snap))
 				self.snap_lsn = tonumber64(snap:sub(1, -#".snap"-1))
+
+				snap = fio.pathjoin(opts.dir.snap, snap)
+				iterator = fun.chain(
+					iterator,
+					M.file(snap),
+					fun.iter{1}:map(function() self:confirm(self.snap_lsn) end):grep(fun.op.truth),
+					finalizer(self, ("Snapshot %s was recovered"):format(snap))
+				)
 			end
 		else
 			self.snap_lsn = self.confirmed_lsn
 		end
+
 
 		if opts.dir.xlog then
 			if not fio.path.is_dir(opts.dir.xlog) then
@@ -282,13 +292,17 @@ function M.pairs(opts)
 					break
 				end
 			end
+
 			for j = pos, #xlogs do
-				table.insert(self.fileorder, fio.pathjoin(opts.dir.xlog, xlogs[j]))
+				local xlog = fio.pathjoin(opts.dir.xlog, xlogs[j])
+				iterator = fun.chain(
+					iterator,
+					M.file(xlog),
+					finalizer(self, ("Xlog %s was recovered"):format(xlog))
+				)
 			end
 		end
 	end
-
-	local iterator = fun.iter(dir_iterator, self, { fid = 0 })
 
 	if opts.replication then
 		if type(opts.replication) == 'string' then
@@ -306,22 +320,19 @@ function M.pairs(opts)
 			error("Malformed field replication", 2)
 		end
 
-		iterator = fun.chain(iterator, fun.ones():take_while(function()
-				if not self.replica_iterator then
-					self:commit()
-					fiber.yield()
-					self.replication.confirmed_lsn = self.confirmed_lsn
-					self.replica_iterator = M.replica(self.replication)
-					self.replica = assert(self.replica_iterator.param.replica, "no replica")
-					self.replica:wait_con(10)
-				end
-				if self.replica:consistent() then
-					self.replica:close()
-					return false
-				end
-				return true
-			end):map(function()
-				return self.replica_iterator:nth(1)
+		iterator = fun.chain(
+			iterator,
+			fun.iter{1}:each(function()
+				self.replication.confirmed_lsn = self.confirmed_lsn
+				self.replica_iterator = M.replica(self.replication)
+				self.replica = assert(self.replica_iterator.param.replica, "no replica")
+				assert(self.replica:wait_con(10), "replica not connected")
+			end),
+			fun.ones():take_while(function()
+				return not self.replica:consistent()
+			end),
+			fun.iter{1}:each(function()
+				self.replica:close()
 			end)
 		)
 	end
