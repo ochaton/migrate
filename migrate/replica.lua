@@ -73,7 +73,6 @@ function M:_init(host, primary_port, opt)
 	self.upstream = { host = host, port = tonumber(box_cfg.replication_port) }
 	self.replica_state = DISCONECT
 	self:super(M, '_init')(self.upstream.host, self.upstream.port, opt)
-	self.connected = fiber.cond()
 end
 
 function M:on_connected()
@@ -81,7 +80,6 @@ function M:on_connected()
 	self:log('I', "Connection established. Requesting LSN=%s", request_lsn)
 	self:push_write(ffi.new('uint64_t[1]', request_lsn), 8)
 	self.replica_state = REQUESTED
-	self.connected:broadcast()
 end
 
 function M:on_disconnect(e)

@@ -3,6 +3,7 @@ local errno = require 'errno'
 local fio = require 'fio'
 local fun = require 'fun'
 local fiber = require 'fiber'
+local clock = require 'clock'
 local log = require 'log'
 local saferbuf = require 'bin.saferbuf'
 
@@ -14,6 +15,9 @@ ffi.typedef('off64_t', [[typedef int64_t off64_t;]])
 ffi.fundef('mmap', [[void *mmap(void *addr, size_t length, int prot, int flags,int fd, off64_t offset);]])
 ffi.fundef('munmap', [[int munmap(void *addr, size_t length);]])
 ffi.fundef('madvise', [[int madvise(void *addr, size_t length, int advice);]])
+
+local ffi_cast = ffi.cast
+local C = ffi.C
 
 local PROT_READ  = 1
 local MAP_SHARED = 1
@@ -36,12 +40,12 @@ local function file_iterator(self)
 	assert(buf:u32() == magic, "malformed row magic")
 
 	assert(buf:have(hsize), "unexpected end of file")
-		local h = ffi.cast('struct header_v11 *', buf.p.c)
-		assert(h.header_crc32c == ffi.C.crc32_calc(0, buf.p.c+4, hsize-4), "header crc32 missmatch")
+		local h = ffi_cast('struct header_v11 *', buf.p.c)
+		assert(h.header_crc32c == C.crc32_calc(0, buf.p.c+4, hsize-4), "header crc32 missmatch")
 	buf:skip(hsize)
 
 	assert(buf:have(h.len), "unexpected end of file")
-	assert(h.data_crc32c == ffi.C.crc32_calc(0, buf.p.c, h.len), "data crc32c missmatch")
+	assert(h.data_crc32c == C.crc32_calc(0, buf.p.c, h.len), "data crc32c missmatch")
 
 	assert(buf:u16() == self.row_type, "unexpected row_type received")
 	buf:skip(8) -- drop cookie
@@ -68,17 +72,25 @@ local function file_iterator(self)
 end
 
 local function file_iterator_close(obj)
-	local self = obj.orig
+	local self = obj.orig or obj
+	log.verbose("Closing file_iterator %s (guard: %s)", self.path, obj.orig ~= nil)
+
+	local base = self.base
+	self.base = nil
 	self.buf = nil
-	if self.base then
-		ffi.gc(self.base, nil)
-		if -1 == ffi.C.munmap(self.base, self.size) then
+
+	if not obj.orig then
+		(debug.getmetatable(self.__guard) or {}).orig = nil
+		debug.setmetatable(self.__guard, nil)
+	end
+	self.__guard = nil
+
+	if base then
+		ffi.gc(base, nil)
+		if -1 == C.munmap(base, self.size) then
 			error(("Failed to unmap addr for %s: %s"):format(self.path, errno.strerror(ffi.errno())), 2)
 		end
-		self.base = nil
 	end
-	log.verbose("Closing %s", self.path)
-	fiber.new(self.file.close, self.file)
 end
 
 function M.file(path)
@@ -96,12 +108,12 @@ function M.file(path)
 	local header, row_type, parser, source
 	if path:match("%.xlog$") then
 		header = "XLOG\n0.11\n\n"
-		row_type = ffi.C.XLOG
+		row_type = C.XLOG
 		parser = parse_xlog_row
 		source = 'xlog'
 	elseif path:match("%.snap$") then
 		header = "SNAP\n0.11\n\n"
-		row_type = ffi.C.SNAP
+		row_type = C.SNAP
 		parser = parse_snap_row
 		source = 'snap'
 	else
@@ -116,83 +128,67 @@ function M.file(path)
 	self.path     = path
 	self.size     = tonumber64(file:stat().size)
 
-	local size = self.size
-	local base = ffi.C.mmap(box.NULL, self.size, PROT_READ, MAP_SHARED, file.fh, 0)
-	ffi.gc(base, function(b) ffi.C.munmap(b, size) end)
-
+	local base = C.mmap(box.NULL, self.size, PROT_READ, MAP_SHARED, file.fh, 0)
 	if base == -1 then
 		error(errno.strerror(ffi.errno()))
 	end
-	if -1 == ffi.C.madvise(base, self.size, MADV_SEQUENTIAL) then
+	if -1 == C.madvise(base, self.size, MADV_SEQUENTIAL) then
 		error(errno.strerror(ffi.errno()))
 	end
 	self.base = base
 	self.buf = saferbuf.new(base, self.size)
+	self.close = file_iterator_close
 
-	function self.close(obj)
-		obj.buf = nil
-		if obj.base then
-			ffi.gc(obj.base, nil)
-			if -1 == ffi.C.munmap(obj.base, obj.size) then
-				error(("Failed to unmap addr for %s: %s"):format(path, errno.strerror(ffi.errno())), 2)
-			end
-			obj.base = nil
-		end
-		log.verbose("Closing %s", path)
-		fiber.new(obj.file.close, obj.file)
-	end
+	assert(file:close())
+	self.file = nil
 
 	self.__guard = newproxy()
 	debug.setmetatable(self.__guard, {
-		__index = { orig = { base = self.base, size = self.size, path = self.path, file = self.file, buf = self.buf } },
-		__gc = file_iterator_close,
+		__index = { orig = { base = self.base, size = self.size, path = self.path, buf = self.buf } },
+		__gc = self.close,
 	})
 
 	assert(self.buf:str(#self.header) == self.header, "binary header missmatch")
 	return fun.iter(file_iterator, self)
 end
 
-local methods = {}
-methods.__index = methods
-
-function methods:commit()
-	if self.persist then
-		self.in_txn = 0
-		box.commit()
-	end
+local function once(func, ...)
+	local args = {n = select('#', ...), ...}
+	return fun.range(1):map(function() func(unpack(args, 1, args.n)) return end)
 end
 
-function methods:confirm(next_lsn)
-	if self.persist then
-		if self.in_txn == self.txn then
-			box.commit()
-			box.begin()
-			self.in_txn = 0
+local function checklsn(self)
+	return function(trans)
+		local h = trans.HEADER
+		if h.lsn ~= self.confirmed_lsn+1 then
+			error(("XlogGapError: Missing transactions between %s and %s while reading %s:%s"):format(
+				self.confirmed_lsn, h.lsn, h.source, h.file
+			))
 		end
-		self.in_txn = self.in_txn + 1
-		self.confirmed_lsn = self.schema:put({ 'confirmed_lsn', next_lsn }).value
-	else
-		self.confirmed_lsn = next_lsn
+		self:confirm(h.lsn)
+		return trans
 	end
-	log.verbose("Confirm lsn: %s", self.confirmed_lsn)
-	return self.confirmed_lsn
 end
 
-local function finalizer(self, msg)
-	return fun.iter({1}):map(function()
-		self:commit()
-		fiber.yield()
-		log.info(msg)
-	end):grep(fun.op.truth)
+local function confirmer(self)
+	return function(t)
+		self:confirm(t.HEADER.lsn)
+		return t
+	end
+end
+
+local function xlog2lsn(path)
+	return (assert(tonumber64(fio.basename(path):sub(1, -#".xlog"-1)), "malformed xlog name"))
 end
 
 function M.pairs(opts)
 	if type(opts) == 'string' then
 		if fio.path.is_dir(opts) then
+			local dir = opts
 			opts = {
 				dir = {
-					snap = opts,
-					xlog = opts,
+					snap = dir,
+					xlog = dir,
 				},
 				confirmed_lsn = 0,
 				persist = false,
@@ -205,14 +201,21 @@ function M.pairs(opts)
 		error("Usage: migrate.pairs(opts|path)", 2)
 	end
 
-	local self = setmetatable({
+	local self = {
 		confirmed_lsn = opts.confirmed_lsn or 0,
 		persist = opts.persist,
 		txn = opts.txn or 1,
 		checklsn = true,
+		debug = opts.debug,
+
+		on_replica_connected = opts.on_replica_connected or function() end,
 
 		in_txn = 0,
-	}, methods)
+	}
+
+	if self.confirmed_lsn < 0 then
+		error("confirmed_lsn must be >= 0", 2)
+	end
 
 	if opts.checklsn == false then
 		self.checklsn = false
@@ -240,6 +243,33 @@ function M.pairs(opts)
 		end
 
 		self.confirmed_lsn = confirmed_lsn
+
+		function self.commit(this)
+			this.in_txn = 0
+			box.commit()
+		end
+
+		function self.confirm(this, next_lsn)
+			if this.in_txn == this.txn then
+				box.commit()
+				box.begin()
+				this.in_txn = 0
+			end
+			this.in_txn = this.in_txn + 1
+			this.confirmed_lsn = this.schema:put({ 'confirmed_lsn', next_lsn }).value
+			if this.debug then
+				log.verbose("confirm(%s)", next_lsn)
+			end
+		end
+	else
+		self.commit = function() end
+		function self.confirm(this, next_lsn)
+			this.confirmed_lsn = next_lsn
+			if this.debug then
+				log.verbose("confirm(%s)", next_lsn)
+			end
+			return this.confirmed_lsn
+		end
 	end
 
 	local iterator = fun.iter{} -- empty iterator
@@ -247,10 +277,10 @@ function M.pairs(opts)
 	if opts.dir then
 		if type(opts.dir) == 'string' then
 			opts.dir = { snap = opts.dir, xlog = opts.dir }
+		elseif type(opts.dir) ~= 'table' then
+			error("Usage: migrate.pairs{ dir = { xlog = 'path/to/xlogs', snap = 'path/to/snaps' } }", 2)
 		end
 		opts.dir.xlog = opts.dir.xlog or opts.dir.snap
-
-		self.fileorder = {}
 
 		if opts.dir.snap and self.confirmed_lsn == 0 then
 			local snaps = fun.grep("^[0-9]+%.snap$", fio.listdir(opts.dir.snap)):totable()
@@ -264,17 +294,20 @@ function M.pairs(opts)
 				self.snap_lsn = tonumber64(snap:sub(1, -#".snap"-1))
 
 				snap = fio.pathjoin(opts.dir.snap, snap)
-				iterator = fun.chain(
-					iterator,
-					M.file(snap),
-					fun.iter{1}:map(function() self:confirm(self.snap_lsn) end):grep(fun.op.truth),
-					finalizer(self, ("Snapshot %s was recovered"):format(snap))
-				)
+				iterator = iterator
+					:chain(once(function() self.snap_recovery_started = clock.time() end))
+					:chain(M.file(snap))
+					:chain(
+						once(function()
+							self:confirm(self.snap_lsn)
+							self:commit()
+							log.info("Snapshot %s was recovered in %.2fs", snap, clock.time()-self.snap_recovery_started)
+						end)
+					)
 			end
 		else
 			self.snap_lsn = self.confirmed_lsn
 		end
-
 
 		if opts.dir.xlog then
 			if not fio.path.is_dir(opts.dir.xlog) then
@@ -286,7 +319,7 @@ function M.pairs(opts)
 
 			local pos = 1
 			for i = #xlogs, 1, -1 do
-				local xlog_lsn = tonumber64(xlogs[i]:sub(1, -#".xlog"-1))
+				local xlog_lsn = xlog2lsn(xlogs[i])
 				if xlog_lsn < self.snap_lsn then
 					pos = i
 					break
@@ -295,11 +328,36 @@ function M.pairs(opts)
 
 			for j = pos, #xlogs do
 				local xlog = fio.pathjoin(opts.dir.xlog, xlogs[j])
-				iterator = fun.chain(
-					iterator,
-					M.file(xlog),
-					finalizer(self, ("Xlog %s was recovered"):format(xlog))
-				)
+
+				local xlog_iterator do
+					xlog_iterator = M.file(xlog)
+
+					local xlog_lsn = xlog2lsn(xlogs[j])
+					if xlog_lsn <= self.snap_lsn then
+						xlog_iterator = xlog_iterator:drop_while(function(t)
+							return t.HEADER.lsn < self.snap_lsn
+						end)
+					end
+
+					if self.checklsn then
+						-- checklsn also confirms lsn if wal order is ok
+						log.verbose("Setting checklsn for %s", xlog)
+						xlog_iterator = xlog_iterator:map(checklsn(self))
+					else
+						xlog_iterator = xlog_iterator:map(confirmer(self))
+					end
+				end
+
+				-- Chain xlog iterator into global iterator:
+				iterator = iterator
+					:chain(once(function() self.xlog_recovery_started = clock.time() end))
+					:chain(xlog_iterator)
+					:chain(
+						once(function()
+							self:commit()
+							log.info("Xlog %s was recovered in %.2fs", xlog, clock.time() - self.xlog_recovery_started)
+						end)
+					)
 			end
 		end
 	end
@@ -322,48 +380,34 @@ function M.pairs(opts)
 
 		iterator = fun.chain(
 			iterator,
-			fun.range(1, 1):map(function()
+
+			once(function()
 				self.replication.confirmed_lsn = self.confirmed_lsn
-				self.replica_iterator = M.replica(self.replication)
-				self.replica = assert(self.replica_iterator.param.replica, "no replica")
+				self.replica_iterator, self.replica = M.replica(self.replication)
+
+				self:on_replica_connected(self.replica)
+
+				if self.checklsn then
+					self.replica_iterator = self.replica_iterator:map(checklsn(self))
+				else
+					self.replica_iterator = self.replica_iterator:map(confirmer(self))
+				end
 			end),
 
-			fun.ones():take_while(function()
-				return not self.replica:consistent()
-			end):map(function()
-				return self.replica_iterator:nth(1)
-			end),
+			fun.ones():map(function() return self.replica_iterator:nth(1) end):take_while(fun.op.truth),
 
-			fun.iter{1}:map(function()
+			once(function()
 				self.replica:close()
 			end)
-		):grep(fun.op.truth)
+		)
 	end
 
-	if self.checklsn then
-		iterator = iterator:map(function(trans)
-			local h = trans.HEADER
-			if h.source == 'xlog' and h.lsn > self.confirmed_lsn then
-				if h.lsn ~= self.confirmed_lsn+1 then
-					error(("XlogGapError: Missing transactions between %s and %s while reading %s"):format(
-						self.confirmed_lsn, h.lsn, self.file
-					))
-				end
-				self:confirm(h.lsn)
-			end
-			return trans
-		end)
-	else
-		iterator = iterator:map(function(t)
-			self:confirm(t.HEADER.lsn)
-			return t
-		end)
-	end
-
+	-- We need to close openned transaction
 	if self.persist then
-		-- We need to close openned transaction
-		iterator = fun.chain(iterator, fun.iter({1}):map(box.commit):grep(fun.op.truth))
+		iterator = iterator:chain(once(box.commit))
 	end
+
+	iterator = iterator:grep(fun.op.truth)
 
 	self.iterator = iterator
 	return iterator
@@ -401,7 +445,7 @@ end
 
 function M.replica(opts)
 	if type(opts) ~= 'table' then
-		error("Usage: migrate.replica({[host:port]]})", 2)
+		error("Usage: migrate.replica({host = 'host', port = 'port', ...})", 2)
 	end
 
 	local channel = fiber.channel()
@@ -411,7 +455,7 @@ function M.replica(opts)
 	end
 
 	local self = { channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
-	return fun.iter(replica_iterator, self)
+	return fun.iter(replica_iterator, self), self.replica
 end
 
 return M
