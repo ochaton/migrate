@@ -71,24 +71,20 @@ local function file_iterator(self)
 	}
 end
 
-local function file_iterator_close(obj)
-	local self = obj.orig or obj
-	log.verbose("Closing file_iterator %s (guard: %s)", self.path, obj.orig ~= nil)
+local function file_iterator_close(self)
+	local orig = getmetatable(self).__index
+	debug.setmetatable(self, nil)
 
-	local base = self.base
-	self.base = nil
-	self.buf = nil
+	log.verbose("Closing file_iterator %s", orig.path)
 
-	if not obj.orig then
-		(debug.getmetatable(self.__guard) or {}).orig = nil
-		debug.setmetatable(self.__guard, nil)
-	end
-	self.__guard = nil
+	local base = orig.base
+	orig.base = nil
+	orig.buf = nil
 
 	if base then
-		ffi.gc(base, nil)
-		if -1 == C.munmap(base, self.size) then
-			error(("Failed to unmap addr for %s: %s"):format(self.path, errno.strerror(ffi.errno())), 2)
+		log.verbose("Unmapping base for %s", orig.path)
+		if -1 == C.munmap(base, orig.size) then
+			error(("Failed to unmap addr for %s: %s"):format(orig.path, errno.strerror(ffi.errno())), 2)
 		end
 	end
 end
@@ -104,7 +100,7 @@ function M.file(path)
 
 	log.verbose("File %s openned", path)
 
-	local self = { file = file }
+	local self = { file = file, close = file_iterator_close }
 	local header, row_type, parser, source
 	if path:match("%.xlog$") then
 		header = "XLOG\n0.11\n\n"
@@ -142,14 +138,14 @@ function M.file(path)
 	assert(file:close())
 	self.file = nil
 
-	self.__guard = newproxy()
-	debug.setmetatable(self.__guard, {
-		__index = { orig = { base = self.base, size = self.size, path = self.path, buf = self.buf } },
-		__gc = self.close,
+	local public = newproxy()
+	debug.setmetatable(public, {
+		__index = self,
+		__gc = file_iterator_close,
 	})
 
 	assert(self.buf:str(#self.header) == self.header, "binary header missmatch")
-	return fun.iter(file_iterator, self)
+	return fun.iter(file_iterator, public)
 end
 
 local function once(func, ...)
