@@ -198,7 +198,7 @@ function M.pairs(opts)
 	end
 
 	local self = {
-		confirmed_lsn = opts.confirmed_lsn or 0,
+		confirmed_lsn = opts.confirmed_lsn or 1,
 		persist = opts.persist,
 		txn = opts.txn or 1,
 		checklsn = true,
@@ -365,6 +365,7 @@ function M.pairs(opts)
 				host = host,
 				port = tonumber(port),
 				timeout = 1,
+				debug = self.debug,
 			}
 		elseif type(opts.replication) == 'table' then
 			self.replication = opts.replication
@@ -447,7 +448,7 @@ function M.replica(opts)
 	local channel = fiber.channel()
 
 	function opts.on_tuple(...)
-		channel:put({...})
+		assert(channel:put({...}))
 	end
 
 	local self = { channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }

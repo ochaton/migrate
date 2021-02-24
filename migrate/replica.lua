@@ -112,6 +112,9 @@ function M:consistent()
 end
 
 function M:on_read(is_last)
+	if self.debug then
+		self:log('D', "on_read(is_last:%s) => avail: %s", is_last, self.avail)
+	end
 	local buf = saferbuf.new(self.rbuf, self.avail)
 
 	if self.replica_state == REQUESTED then
@@ -142,7 +145,7 @@ function M:on_read(is_last)
 		self.last_action = fiber.time()
 		self.lag = self.last_action - h.tm
 
-		if not self:callback(h, parse_xlog_row(buf)) then
+		if not self:callback({ lsn = h.lsn, tm = h.tm }, parse_xlog_row(buf)) then
 			break
 		end
 		confirmed_lsn = h.lsn
