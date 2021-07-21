@@ -153,6 +153,12 @@ local function once(func, ...)
 	return fun.range(1):map(function() func(unpack(args, 1, args.n)) return end)
 end
 
+local function proxy(func)
+	return function(...)
+		return func(...) or ...
+	end
+end
+
 local function checklsn(self)
 	return function(trans)
 		local h = trans.HEADER
@@ -186,7 +192,6 @@ function M.pairs(opts)
 					snap = dir,
 					xlog = dir,
 				},
-				confirmed_lsn = 0,
 				persist = false,
 			}
 		else
@@ -198,7 +203,7 @@ function M.pairs(opts)
 	end
 
 	local self = {
-		confirmed_lsn = opts.confirmed_lsn or 1,
+		confirmed_lsn = opts.confirmed_lsn or 0,
 		persist = opts.persist,
 		txn = opts.txn or 1,
 		checklsn = true,
@@ -218,47 +223,70 @@ function M.pairs(opts)
 	end
 
 	if self.persist then
-		box.schema.space.create('_migration', {
-			format = {
-				{ name = 'key',   type = 'string' },
-				{ name = 'value', type = 'unsigned' },
-			},
-			if_not_exists = true,
-		}):create_index('pri', {
-			parts = { 'key' },
-			if_not_exists = true,
-		})
-		self.schema = box.space._migration
-		local promote_lsn = (self.schema:get('promote_lsn') or {}).value
-		local confirmed_lsn = (self.schema:get('confirmed_lsn') or {}).value
+		self.schema = box.space._schema
+
+		local promote_lsn, confirmed_lsn do
+			local t
+			t = self.schema:get('migrate_promote_lsn')
+			promote_lsn = t and t[2] or 0
+
+			t = self.schema:get('migrate_confirmed_lsn')
+			confirmed_lsn = t and t[2] or 0
+		end
 
 		if confirmed_lsn < promote_lsn then
 			error("Cannot start migration. Previous migration was aborted during snapshot recovery. "
 				.."You need to truncate all spaces which were affected during previous recovery and "
-				.."box.space._migration", 2)
+				.."rollback `migrate_confirmed_lsn` and `migrate_promote_lsn` in `box.space._schema`",
+				2)
 		end
 
 		self.confirmed_lsn = confirmed_lsn
 
-		function self.commit(this)
-			this.in_txn = 0
+		function self.commit()
+			-- confirm_lsn only for last transaction in batch
+			if self.debug then
+				log.verbose("_schema:put { migrate_confirmed_lsn, %q }", self.confirmed_lsn)
+			end
+			self.schema:put({ 'migrate_confirmed_lsn', self.confirmed_lsn })
 			box.commit()
+			self.in_txn = 0
+		end
+		function self.begin()
+			self.in_txn = 0
+			box.begin()
+		end
+
+		function self.recovery_snap_row()
+			if not self.schema:get('migrate_promote_lsn') then
+				log.warn("promote_lsn(%s)", self.snap_lsn)
+				self.schema:put({ 'migrate_promote_lsn', self.snap_lsn })
+			end
+			if self.in_txn == self.txn then
+				self.commit()
+				self.begin()
+				self.in_txn = 0
+			end
+			self.in_txn = self.in_txn + 1
 		end
 
 		function self.confirm(this, next_lsn)
+			this.confirmed_lsn = next_lsn
 			if this.in_txn == this.txn then
-				box.commit()
-				box.begin()
+				self.commit()
+				self.begin()
 				this.in_txn = 0
 			end
 			this.in_txn = this.in_txn + 1
-			this.confirmed_lsn = this.schema:put({ 'confirmed_lsn', next_lsn }).value
 			if this.debug then
 				log.verbose("confirm(%s)", next_lsn)
 			end
 		end
 	else
 		self.commit = function() end
+		self.begin = function() end
+		self.recovery_snap_row = function() end
+
 		function self.confirm(this, next_lsn)
 			this.confirmed_lsn = next_lsn
 			if this.debug then
@@ -279,6 +307,10 @@ function M.pairs(opts)
 		opts.dir.xlog = opts.dir.xlog or opts.dir.snap
 
 		if opts.dir.snap and self.confirmed_lsn == 0 then
+			if not fio.path.is_dir(opts.dir.snap) then
+				error(opts.dir.snap .. ": is not a directory", 2)
+			end
+
 			local snaps = fun.grep("^[0-9]+%.snap$", fio.listdir(opts.dir.snap)):totable()
 			table.sort(snaps)
 
@@ -292,7 +324,8 @@ function M.pairs(opts)
 				snap = fio.pathjoin(opts.dir.snap, snap)
 				iterator = iterator
 					:chain(once(function() self.snap_recovery_started = clock.time() end))
-					:chain(M.file(snap))
+					:chain(once(self.begin))
+					:chain(M.file(snap):map(proxy(self.recovery_snap_row)))
 					:chain(
 						once(function()
 							self:confirm(self.snap_lsn)
@@ -350,7 +383,8 @@ function M.pairs(opts)
 					:chain(xlog_iterator)
 					:chain(
 						once(function()
-							self:commit()
+							self.recovery_snap_row()
+							self.commit()
 							log.info("Xlog %s was recovered in %.2fs", xlog, clock.time() - self.xlog_recovery_started)
 						end)
 					)
@@ -401,12 +435,20 @@ function M.pairs(opts)
 
 	-- We need to close openned transaction
 	if self.persist then
-		iterator = iterator:chain(once(box.commit))
+		iterator = iterator:chain(once(self.commit))
 	end
 
 	iterator = iterator:grep(fun.op.truth)
 
 	self.iterator = iterator
+
+	---@TODO: automigrate based on DDL
+	-- if opts.automigrate then
+	-- 	assert(opts.ddl, "ddl is required for automigrate")
+	-- 	self.iterator:each(require 'migrate.automigrate'(opts.ddl))
+	-- 	return true
+	-- end
+
 	return iterator
 end
 

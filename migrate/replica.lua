@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-field
 local connection = require 'connection'
 local tnt15 = require 'connection.legacy'
 
