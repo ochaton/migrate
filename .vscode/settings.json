@@ -1,0 +1,9 @@
+{
+  "Lua.diagnostics.disable": [
+    "missing-parameter"
+  ],
+  "Lua.diagnostics.globals": [
+    "box",
+    "tonumber64"
+  ]
+}

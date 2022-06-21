@@ -150,7 +150,7 @@ end
 
 local function once(func, ...)
 	local args = {n = select('#', ...), ...}
-	return fun.range(1):map(function() func(unpack(args, 1, args.n)) return end)
+	return fun.range(1):map(function() func(unpack(args, 1, args.n)) end)
 end
 
 local function proxy(func)

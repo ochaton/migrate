@@ -12,6 +12,7 @@ dependencies = {
    "lua ~> 5.1",
    "bin scm-4",
    "ffi-reloadable scm-1",
+   "connection-legacy scm-3",
 }
 build = {
    type = "builtin",
