@@ -17,6 +17,7 @@ build = {
    type = "builtin",
    modules = {
       ["migrate"] = "migrate/init.lua",
-      ["migrate.parser"] = "migrate/parser.lua"
+      ["migrate.parser"] = "migrate/parser.lua",
+      ["migrate.replica"] = "migrate/replica.lua"
    }
 }
