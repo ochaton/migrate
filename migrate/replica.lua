@@ -8,6 +8,7 @@ local saferbuf = require 'bin.saferbuf'
 local fiber = require 'fiber'
 local errno = require 'errno'
 local json = require 'json'
+local background = require 'background'
 
 local DISCONECT = 1
 local REQUESTED = 2
@@ -26,10 +27,13 @@ function M:_init(host, primary_port, opt)
 
 	function self.primary.on_connected(primary)
 		primary:log('I', "Connected to primary")
-		primary.channel = fiber.channel()
 
-		primary.fiber = fiber.create(function()
-			while not primary.channel:is_closed() do
+		primary.fiber = background {
+			name = 'upstream/'..host..':'..primary_port,
+			restart = opt.reconnect,
+			eternal = false,
+			run_interval = 0.1,
+			func = function()
 				local box_info = primary:call('box.dostring', "return box.cjson.encode(box.info())")
 				box_info = json.decode(box_info[1])
 
@@ -38,27 +42,25 @@ function M:_init(host, primary_port, opt)
 				primary.discovered = true
 				primary.discovered_at = fiber.time()
 
-				primary.channel:get(0.1)
-
 				if self.debug then
 					primary:log('D', "primary: %s; LSN=%s; consistent=%s; confirmed_lsn=%s; discovered=%s",
 						primary.remote_rw, primary.remote_lsn, self:consistent(),
 						self.confirmed_lsn, primary.discovered
 					)
 				end
-			end
-		end)
+			end,
+		}
 	end
 
 	function self.primary.on_disconnect(primary)
 		primary:log('W', 'Disconnected from primary')
 		primary.discovered = false
-		primary.fiber:cancel()
+		primary.fiber:shutdown()
 	end
 
 	function self.primary.close(primary, ...)
 		primary:log('W', "Closing connection to primary")
-		primary.channel:close()
+		primary.fiber:shutdown()
 		primary:super(primary, 'close')(...)
 	end
 

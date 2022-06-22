@@ -13,6 +13,7 @@ dependencies = {
    "bin scm-4",
    "ffi-reloadable scm-1",
    "connection-legacy scm-3",
+   "background scm-1",
 }
 build = {
    type = "builtin",
