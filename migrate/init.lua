@@ -409,11 +409,16 @@ function M.pairs(opts)
 			error("Malformed field replication", 2)
 		end
 
+		if not self.replication.txn then
+			self.replication.txn = self.txn
+		end
+
 		iterator = fun.chain(
 			iterator,
 
 			once(function()
 				self.replication.confirmed_lsn = self.confirmed_lsn
+				log.info("confirmed_lsn: %s", self.confirmed_lsn)
 				self.replica_iterator, self.replica = M.replica(self.replication)
 
 				self:on_replica_connected(self.replica)
@@ -455,12 +460,15 @@ end
 local function replica_iterator(self)
 	local t
 	while not t and not self.replica:consistent() do
+		-- if we need to yield, we have to close transaction
+		if self.in_txn and self.in_txn > 0 and self.commit then self.commit() end
 		t = self.channel:get(0.01)
 	end
 	if t == nil then
 		return nil
 	end
 
+	if self.begin then self.begin() end
 	local h, space, tuple, op, extra = unpack(t)
 	local key
 	if op == 'UPDATE' or op == 'DELETE' then
@@ -487,13 +495,13 @@ function M.replica(opts)
 		error("Usage: migrate.replica({host = 'host', port = 'port', ...})", 2)
 	end
 
-	local channel = fiber.channel()
+	local channel = fiber.channel(2*(opts.txn or 1))
 
 	function opts.on_tuple(...)
 		assert(channel:put({...}))
 	end
 
-	local self = { channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
+	local self = { in_txn = 0, channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
 	return fun.iter(replica_iterator, self), self.replica
 end
 
