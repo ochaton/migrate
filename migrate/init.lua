@@ -271,16 +271,16 @@ function M.pairs(opts)
 		end
 
 		function self.confirm(this, next_lsn)
-			this.confirmed_lsn = next_lsn
 			if this.in_txn == this.txn then
 				self.commit()
 				self.begin()
 				this.in_txn = 0
 			end
-			this.in_txn = this.in_txn + 1
+			this.confirmed_lsn = next_lsn
 			if this.debug then
-				log.verbose("confirm(%s)", next_lsn)
+				log.verbose("confirm(%s) in_txn:%s is_in_txn:%s", next_lsn, this.in_txn, box.is_in_txn())
 			end
+			this.in_txn = this.in_txn + 1
 		end
 	else
 		self.commit = function() end
@@ -419,6 +419,7 @@ function M.pairs(opts)
 			once(function()
 				self.replication.confirmed_lsn = self.confirmed_lsn
 				log.info("confirmed_lsn: %s", self.confirmed_lsn)
+				self.replication.migrator = self
 				self.replica_iterator, self.replica = M.replica(self.replication)
 
 				self:on_replica_connected(self.replica)
@@ -461,14 +462,16 @@ local function replica_iterator(self)
 	local t
 	while not t and not self.replica:consistent() do
 		-- if we need to yield, we have to close transaction
-		if self.in_txn and self.in_txn > 0 and self.commit then self.commit() end
+		if box.is_in_txn() and self.migrator then
+			self.migrator.commit()
+		end
 		t = self.channel:get(0.01)
 	end
 	if t == nil then
 		return nil
 	end
 
-	if self.begin then self.begin() end
+	if self.migrator then self.migrator.begin() end
 	local h, space, tuple, op, extra = unpack(t)
 	local key
 	if op == 'UPDATE' or op == 'DELETE' then
@@ -501,7 +504,7 @@ function M.replica(opts)
 		assert(channel:put({...}))
 	end
 
-	local self = { in_txn = 0, channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
+	local self = { migrator = opts.migrator, channel = channel, replica = require 'migrate.replica'(opts.host, opts.port, opts) }
 	return fun.iter(replica_iterator, self), self.replica
 end
 
