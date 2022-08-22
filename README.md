@@ -17,12 +17,33 @@ This document describes migrate 0.0.1
 
 ```bash
 luarocks --tree .rocks --lua-version 5.1 --server http://moonlibs.github.io/rocks \
-	install https://raw.githubusercontent.com/orchaton/migrate/master/migrate-scm-1.rockspec
+	install https://raw.githubusercontent.com/ochaton/migrate/master/migrate-scm-1.rockspec
+
+# Using tarantool
+tarantoolctl rocks --server=https://moonlibs.github.io/rocks install https://github.com/ochaton/migrate/releases/download/0.1.0/migrate-0.1.0-1.src.rock
+```
+
+This library also published at https://moonlibs.github.io/rocks
+
+Starting from Tarantool 2.10.0 you may add url https://moonlibs.github.io/rocks to you `.rocks/config-5.1.lua` and install library like this:
+
+```bash
+tarantoolctl rocks install migrate
+```
+
+Configuration of rocks servers should be following:
+```
+$ cat .rocks/config-5.1.lua
+rocks_servers = {
+        "http://moonlibs.github.io/rocks",        -- moonlibs libs
+        "http://rocks.tarantool.org/",            -- tarantool libs
+        "http://luarocks.org/repositories/rocks", -- luarocks.org libs
+}
 ```
 
 ## Synopsis
 
-This library provides luafun interface to read binary snapshots and xlogs (yet).
+This library provides luafun interface to read binary snapshots, xlogs and replication.
 
 ```lua
 -- Read single snapshot
@@ -76,16 +97,20 @@ require "migrate".pairs {
 Naive example
 
 ```lua
+-- default log_level=5 (info), log_level=6 (verbose) gives you more information about migration process
+box.cfg{log_level = 6}
+
 require "migrate".pairs {
 	dir = "/path/to/snaps_and_xlogs",
 	persist = true,
 	txn = 1000,
+	debug = false, -- enable this if you want more information about migration process
 	replication = {
 		host = "legacy-master.addr.i",
-		port = 3301, -- primary port,
-		timeout = 3, -- write timeout
+		port = 3301, -- primary port, replica port will be discovered automatically
+		timeout = 3, -- write timeout in seconds
 		reconnect = 1/3, -- default in seconds
-		debug = false,
+		debug = false, -- enable this if you want more verbose information about replication
 	}
 }:each(function(t)
 	local h = t.HEADER
