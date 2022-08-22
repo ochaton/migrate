@@ -1,11 +1,12 @@
+![Linter check](https://github.com/ochaton/migrate/actions/workflows/lint.yml/badge.svg)
+![Release status](https://github.com/ochaton/migrate/actions/workflows/push-rockspec.yml/badge.svg)
+
 # Name
 Migrate - read Tarantool 1.5 snapshots and xlogs inside modern Tarantool.
 
 This module aims to ease migration from Tarantool 1.5 to modern versions of Tarantool.
 
 ## Status
-![Linter check](https://github.com/ochaton/migrate/actions/workflows/lint.yml/badge.svg)
-![Release status](https://github.com/ochaton/migrate/actions/workflows/push-rockspec.yml/badge.svg)
 
 Tested in production
 
