@@ -1,10 +1,10 @@
 ![Linter check](https://github.com/ochaton/migrate/actions/workflows/lint.yml/badge.svg)
 ![Release status](https://github.com/ochaton/migrate/actions/workflows/push-rockspec.yml/badge.svg)
 
-# Name
-Migrate - read Tarantool 1.5 snapshots and xlogs inside modern Tarantool.
+# Migrate
+Read Tarantool 1.5 snapshots, xlogs and replication from modern Tarantool.
 
-This module aims to ease migration from Tarantool 1.5 to modern versions of Tarantool.
+This module aims to ease migration from Tarantool 1.5 to modern versions of Tarantool (1.10.14+).
 
 ## Status
 
@@ -12,7 +12,7 @@ Tested in production
 
 ## Version
 
-This document describes migrate 0.0.1
+This document describes migrate 0.1.0
 
 ## Installation
 * luarocks >= 2.4.2
@@ -20,13 +20,13 @@ This document describes migrate 0.0.1
 
 ```bash
 luarocks --tree .rocks --lua-version 5.1 --server http://moonlibs.github.io/rocks \
-	install https://raw.githubusercontent.com/ochaton/migrate/master/migrate-scm-1.rockspec
+	install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.rockspec
 
-# Using tarantool
-tarantoolctl rocks --server=https://moonlibs.github.io/rocks install https://github.com/ochaton/migrate/releases/download/0.1.0/migrate-0.1.0-1.src.rock
+# Install tarantool from releases
+tarantoolctl rocks --server=https://moonlibs.github.io/rocks install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.rockspec
 ```
 
-This library also published at https://moonlibs.github.io/rocks
+This library also published to https://moonlibs.github.io/rocks
 
 Starting from Tarantool 2.10.0 you may add url https://moonlibs.github.io/rocks to you `.rocks/config-5.1.lua` and install library like this:
 
