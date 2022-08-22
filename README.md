@@ -20,10 +20,10 @@ This document describes migrate 0.1.0
 
 ```bash
 luarocks --tree .rocks --lua-version 5.1 --server http://moonlibs.github.io/rocks \
-	install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.rockspec
+    install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.src.rock
 
 # Install tarantool from releases
-tarantoolctl rocks --server=https://moonlibs.github.io/rocks install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.rockspec
+tarantoolctl rocks --server=https://moonlibs.github.io/rocks install https://github.com/ochaton/migrate/releases/latest/download/migrate-scm-1.src.rock
 ```
 
 This library also published to https://moonlibs.github.io/rocks
