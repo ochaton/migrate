@@ -31,3 +31,12 @@ jobs:
     - run: tarantoolctl rocks new_version --tag ${{ env.TAG }}
     - run: tarantoolctl rocks --server https://moonlibs.github.io/rocks install ${{ env.ROCK_NAME }}-${{ env.TAG }}-1.rockspec
     - run: tarantoolctl rocks pack ${{ env.ROCK_NAME }}-${{ env.TAG }}-1.rockspec
+
+    - uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        prerelease: false
+        files: |
+          README.md
+          *.rockspec
+          *.src.rock
