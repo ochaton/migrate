@@ -6,6 +6,7 @@ source = {
 description = {
    summary = "Parser for Tarantool 1.5 binary files",
    homepage = "https://github.com/orchaton/migrate",
+   detailed = "A library for Tarantool 1.10+ aimed to ease migration data from Tarantool 1.5",
    license = "BSD"
 }
 dependencies = {

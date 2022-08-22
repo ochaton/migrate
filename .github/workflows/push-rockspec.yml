@@ -26,7 +26,7 @@ jobs:
 
     # https://stackoverflow.com/questions/58177786/get-the-current-pushed-tag-in-github-actions
     - name: Set env
-      run: echo "GIT_TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
+      run: echo "TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
 
     - run: tarantoolctl rocks new_version --tag ${{ env.TAG }}
     - run: tarantoolctl rocks install ${{ env.ROCK_NAME }}-${{ env.TAG }}-1.rockspec
