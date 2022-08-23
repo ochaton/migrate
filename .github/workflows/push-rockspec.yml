@@ -41,3 +41,19 @@ jobs:
           README.md
           *.rockspec
           *.src.rock
+    # Install native lua with luarocks
+    - uses: leafo/gh-actions-lua@v9
+      with:
+        luaVersion: "luajit-2.1.0-beta3"
+    - uses: leafo/gh-actions-luarocks@v4
+      with:
+        luarocksVersion: "3.8.0"
+    - uses: unfor19/install-aws-cli-action@v1.0.3
+    - run: mkdir .build && cp *.rockspec .build/ && cp *.src.rock .build/
+    - name: rebuild and publish s3 luarocks server
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.ROCKS_OCHATON_S3_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.ROCKS_OCHATON_S3_SECRET_KEY}}
+        AWS_EC2_METADATA_DISABLED: true
+      run: |
+        cd .build && aws --endpoint-url https://hb.bizmrg.com/ s3 sync s3://rocks.ochaton.me/ ./ && luarocks-admin make_manifest . && aws --endpoint-url https://hb.bizmrg.com/ s3 sync ./ s3://rocks.ochaton.me/;
